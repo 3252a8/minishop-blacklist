@@ -72,3 +72,20 @@
 ## Лицензия
 
 [Unlicense](LICENSE).
+
+## На токены автору
+
+Если плагин экономит вам время, можно подкинуть автору на токены.
+Кофе он ещё сварит сам, а нейросеть в долг не думает ☕
+
+**GRAM · сеть TON**
+
+```text
+UQAW7M3NlFZEAMF8Ei3lXTOz-FMsrcZNrJvRcyDvF0oGYimG
+```
+
+**USDT · сеть TRC20**
+
+```text
+TE8JtteH2yy82CPqRPgAGSfgL2oXqauVk1
+```
