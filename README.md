@@ -81,11 +81,11 @@
 **GRAM · сеть TON**
 
 ```text
-UQAW7M3NlFZEAMF8Ei3lXTOz-FMsrcZNrJvRcyDvF0oGYimG
+UQBPJw1jiLlZroC97J9pJEKa5jl2sDcXj77YsRttftfc1Kvq
 ```
 
 **USDT · сеть TRC20**
 
 ```text
-TE8JtteH2yy82CPqRPgAGSfgL2oXqauVk1
+TJS4BhDQSZpqYHJ79t6sYcXFzTP6geq1Cq
 ```
