@@ -1,4 +1,4 @@
-"""Publish the verified CI artifact, version tag and GitHub Release from main."""
+"""Publish an existing version tag's package to main and GitHub Releases."""
 
 import argparse
 import hashlib
@@ -82,30 +82,8 @@ def check_immutable_files(package: Package, source: str) -> None:
             raise ValueError(f"Current repository source already points to version {latest}")
 
 
-def publish_files(package: Package, source: str) -> str | None:
-    if git("rev-parse", "HEAD") != source:
-        raise ValueError("Checkout does not match the source commit")
-    remote = remote_ref(MAIN)
-    if remote is None:
-        raise ValueError("The main branch is missing")
-    if remote != source:
-        git("fetch", "--no-tags", "--depth=2", "origin", MAIN)
-        parent = git("show", "-s", "--format=%P", remote)
-        changed = set(git("diff-tree", "--no-commit-id", "--name-only", "-r", remote).splitlines())
-        if (
-            parent == source
-            and changed
-            and changed <= package.files.keys()
-            and package.matches(remote)
-        ):
-            print("Package files published by an earlier attempt; resuming the release.")
-            return remote
-        print("Main has moved; the newer workflow run will publish its package.")
-        return None
-
-    check_immutable_files(package, source)
-    if package.matches(source):
-        return source
+def commit_package(package: Package, main: str) -> None:
+    git("checkout", "--detach", main)
     for name, data in package.files.items():
         path = Path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,8 +103,28 @@ def publish_files(package: Package, source: str) -> str | None:
         "--",
         *package.files,
     )
-    git("push", "origin", f"HEAD:{MAIN}")
-    return git("rev-parse", "HEAD")
+
+
+def publish_files(package: Package, source: str) -> None:
+    for attempt in range(3):
+        git("fetch", "--no-tags", "origin", MAIN)
+        main = git("rev-parse", "FETCH_HEAD^{commit}")
+        ancestor = run("git", "merge-base", "--is-ancestor", source, main, check=False)
+        if ancestor.returncode == 1:
+            raise ValueError("The tagged commit must be reachable from origin/main")
+        ancestor.check_returncode()
+        check_immutable_files(package, main)
+        if package.matches(main):
+            print("Package files already present on main.")
+            return
+
+        commit_package(package, main)
+        push = run("git", "push", "origin", f"HEAD:{MAIN}", check=False)
+        if push.returncode == 0:
+            return
+        if attempt == 2 or remote_ref(MAIN) == main:
+            push.check_returncode()
+        print("Main advanced during publication; retrying against its latest commit.")
 
 
 def release_notes(version: str, repository: str) -> str:
@@ -143,13 +141,10 @@ def release_notes(version: str, repository: str) -> str:
     return f"{excerpt}\n\n[Журнал изменений]({url})\n"
 
 
-def check_existing_tag(package: Package, ref: str) -> bool:
-    if remote_ref(ref) is None:
-        return False
-    git("fetch", "--no-tags", "--depth=1", "origin", ref)
-    if not package.matches(git("rev-parse", "FETCH_HEAD^{commit}")):
-        raise ValueError(f"Published tag {ref} already points to different package files")
-    return True
+def verify_tag(ref: str, source: str) -> None:
+    git("fetch", "--no-tags", "origin", ref)
+    if git("rev-parse", "FETCH_HEAD^{commit}") != source:
+        raise ValueError("The remote tag no longer points to the source commit")
 
 
 def release_record(repository: str, tag: str) -> dict[str, object] | None:
@@ -213,13 +208,8 @@ def verify_assets(
     return missing
 
 
-def publish_release(
-    package: Package, directory: Path, repository: str, commit: str, notes: str
-) -> None:
+def publish_release(package: Package, directory: Path, repository: str, notes: str) -> None:
     tag = f"v{package.version}"
-    ref = f"refs/tags/{tag}"
-    if not check_existing_tag(package, ref):
-        git("push", "origin", f"{commit}:{ref}")
     record = release_record(repository, tag)
     if record is None:
         with TemporaryDirectory(dir="/tmp") as temp:
@@ -273,14 +263,24 @@ def main() -> None:
     args = parser.parse_args()
     package = Package.load(args.package_dir)
     repository = os.environ["GITHUB_REPOSITORY"]
-    source = os.environ["GITHUB_SHA"]
-    if os.environ["GITHUB_REF"] != MAIN or not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
-        raise ValueError("Publication requires a GitHub Actions run from main")
+    ref = os.environ["GITHUB_REF"]
+    sha = os.environ["GITHUB_SHA"]
+    if (
+        os.environ["GITHUB_EVENT_NAME"] != "push"
+        or ref != f"refs/tags/v{package.version}"
+        or not re.fullmatch(r"[\w.-]+/[\w.-]+", repository)
+        or not re.fullmatch(r"[a-f0-9]{40}", sha)
+    ):
+        raise ValueError("Publication requires a push of the tag matching the package version")
+    source = git("rev-parse", f"{sha}^{{commit}}")
+    if git("rev-parse", "HEAD^{commit}") != source:
+        raise ValueError("Checkout does not match the source commit")
+
     notes = release_notes(package.version, repository)
-    check_existing_tag(package, f"refs/tags/v{package.version}")
-    commit = publish_files(package, source)
-    if commit is not None:
-        publish_release(package, args.package_dir, repository, commit, notes)
+    verify_tag(ref, source)
+    publish_files(package, source)
+    verify_tag(ref, source)
+    publish_release(package, args.package_dir, repository, notes)
 
 
 if __name__ == "__main__":

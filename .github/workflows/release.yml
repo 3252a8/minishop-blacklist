@@ -2,8 +2,7 @@ name: Signed plugin release
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
 permissions:
   contents: read
@@ -14,23 +13,41 @@ concurrency:
 
 jobs:
   package:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref_type == 'tag' && github.event.created && !github.event.deleted
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Verify tag is on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "The release tag must point to a commit in main."
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Verify tag version matches package metadata
+        run: |
+          python -m pip install --no-cache-dir -r requirements-build.txt
+          python - <<'PY'
+          import os
+          import runpy
+
+          version = runpy.run_path("scripts/build-package.py")["stable_version"]()
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Expected tag v{version}, got {tag}")
+          PY
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install packaging dependencies
-        run: |
-          python -m pip install --no-cache-dir -r requirements-build.txt
-          npm ci --ignore-scripts --no-fund --no-audit
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts --no-fund --no-audit
       - name: Verify and build the admin frontend
         run: |
           npm run check
@@ -57,12 +74,16 @@ jobs:
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    concurrency:
+      group: plugin-release-publish
+      queue: max
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -70,7 +91,7 @@ jobs:
         with:
           name: minishop-blacklist-${{ github.sha }}
           path: dist/release
-      - name: Publish package files, tag and release
+      - name: Publish package files and release
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/publish-package.py
