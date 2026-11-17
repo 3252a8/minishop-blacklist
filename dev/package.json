@@ -43,6 +43,13 @@
         "view": "settings",
         "label": "Settings",
         "i18nKey": "minishop_blacklist_settings"
+      },
+      {
+        "id": "diagnostics",
+        "view": "diagnostics",
+        "label": "Telegram logs",
+        "i18nKey": "minishop_blacklist_debug_tab",
+        "order": 200
       }
     ],
     "user_panels": [

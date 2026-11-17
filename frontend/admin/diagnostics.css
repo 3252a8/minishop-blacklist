@@ -1,0 +1,73 @@
+.minishop-blacklist .blacklist-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.minishop-blacklist .blacklist-log-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.minishop-blacklist .blacklist-log-list:empty {
+  display: none;
+}
+
+.minishop-blacklist .blacklist-log-list details {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #ccd3da);
+  border-radius: var(--radius-card, 8px);
+  background: var(--panel, #fff);
+}
+
+.minishop-blacklist .blacklist-log-list summary {
+  min-width: 0;
+  cursor: pointer;
+}
+
+.minishop-blacklist .blacklist-log-list summary > * {
+  margin-inline-start: 8px;
+}
+
+.minishop-blacklist .blacklist-log-list summary:focus-visible {
+  outline: 2px solid var(--accent, #087247);
+  outline-offset: 3px;
+}
+
+.minishop-blacklist .blacklist-log-list [data-status="error"] {
+  color: var(--danger-text, #aa2727);
+}
+
+.minishop-blacklist .blacklist-log-list [data-status="sent"] {
+  color: var(--success-text, #087247);
+}
+
+.minishop-blacklist .blacklist-log-list dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 10px 0;
+}
+
+.minishop-blacklist .blacklist-log-list dd {
+  margin: 0;
+}
+
+.minishop-blacklist .blacklist-log-list h3 {
+  margin-top: 10px;
+}
+
+.minishop-blacklist .blacklist-log-list pre {
+  margin: 5px 0 0;
+  padding: 8px;
+  border-radius: var(--radius-inner, 6px);
+  background: var(--panel-2, #f5f7fa);
+  color: inherit;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -26,6 +26,7 @@ interface SourceStatus {
 export interface SettingsData {
   settings: Settings;
   sourceStatuses: SourceStatus[];
+  refreshPending: boolean;
 }
 
 export interface Reason {
@@ -44,12 +45,63 @@ export interface MatchRow extends Status {
   telegramId: string;
   name: string | null;
   username: string | null;
+  profile: MatchProfile | null;
+}
+
+export interface TariffOption {
+  tariff_key: string | null;
+  tariff_names: Record<string, string>;
+  is_configured: boolean;
+  is_enabled: boolean | null;
+}
+
+export interface MatchProfile {
+  user_id: number;
+  minishop_id: string | null;
+  telegram_id: number | null;
+  first_name: string | null;
+  last_name: string | null;
+  username: string | null;
+  email: string | null;
+  avatar_url: string | null;
+  telegram_photo_url: string | null;
+  registration_date: string | null;
+  is_banned: boolean;
+  panel_status: string | null;
+  panel_status_expired_at: string | null;
+  subscription_expires_at: string | null;
+  subscription_plan: (TariffOption & { kind: "trial" | "tariff" | "unassigned"; is_active: boolean }) | null;
+  premium_traffic: {
+    state: "none" | "unlimited" | "good" | "warn" | "critical";
+    used_bytes: number;
+    limit_bytes: number | null;
+  };
+  payments_total_amount: number;
+  payments_count: number;
+  payments_currency: string | null;
+  invited_users_count: number;
+  user_balance_amount_minor: number;
+  partner_balance_amount_minor: number;
 }
 
 export interface MatchPage {
   enabled: boolean;
   rows: MatchRow[];
   total: number;
+  user_balance_enabled: boolean;
+  partner_balance_enabled: boolean;
+  balance_currency: string;
+  balance_currency_scale: number;
+  tariff_options: TariffOption[];
+}
+
+export interface MatchFilters {
+  q: string;
+  sort: string;
+  filter: string;
+  panel_status: string;
+  premium_traffic: string;
+  tariff_filter: string;
 }
 
 export class ApiError extends Error {
@@ -58,17 +110,17 @@ export class ApiError extends Error {
   }
 }
 
-function record(value: unknown): Record<string, unknown> {
+export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError("invalid_response");
   return value as Record<string, unknown>;
 }
 
-function string(value: unknown): string {
+export function string(value: unknown): string {
   if (typeof value !== "string") throw new ApiError("invalid_response");
   return value;
 }
 
-function boolean(value: unknown): boolean {
+export function boolean(value: unknown): boolean {
   if (typeof value !== "boolean") throw new ApiError("invalid_response");
   return value;
 }
@@ -78,25 +130,26 @@ function integer(value: unknown): number {
   return value;
 }
 
-function nullable<T>(value: unknown, decode: (value: unknown) => T): T | null {
+export function nullable<T>(value: unknown, decode: (value: unknown) => T): T | null {
   return value === null ? null : decode(value);
 }
 
-function array<T>(value: unknown, decode: (value: unknown) => T): T[] {
+export function array<T>(value: unknown, decode: (value: unknown) => T): T[] {
   if (!Array.isArray(value)) throw new ApiError("invalid_response");
   return value.map(decode);
 }
 
-function choice<T extends string>(value: unknown, choices: readonly T[]): T {
+export function choice<T extends string>(value: unknown, choices: readonly T[]): T {
   const selected = choices.find((item) => item === value);
   if (selected === undefined) throw new ApiError("invalid_response");
   return selected;
 }
 
-function decodeSettingsData(payload: Record<string, unknown>): SettingsData {
+export function decodeSettingsData(payload: Record<string, unknown>): SettingsData {
   const settings = record(payload.settings);
   const display = record(settings.display);
   return {
+    refreshPending: boolean(payload.refreshPending),
     settings: {
       sources: array(settings.sources, string),
       refreshHours: integer(settings.refreshHours),
@@ -135,7 +188,7 @@ function decodeStatus(value: unknown): Status {
   };
 }
 
-async function request(path: string, signal: AbortSignal, method = "GET", body?: object) {
+export async function request(path: string, signal: AbortSignal, method = "GET", body?: object) {
   const headers: Record<string, string> = { Accept: "application/json" };
   const options: RequestInit = { method, headers, credentials: "same-origin", signal };
   if (body !== undefined) {
@@ -161,8 +214,62 @@ export async function putSettings(settings: Settings, signal: AbortSignal): Prom
   return decodeSettingsData(await request("/settings", signal, "PUT", settings));
 }
 
-export async function getMatches(limit: number, offset: number, signal: AbortSignal): Promise<MatchPage> {
-  const payload = await request(`/matches?limit=${limit}&offset=${offset}`, signal);
+export async function startSourceRefresh(signal: AbortSignal): Promise<SettingsData> {
+  return decodeSettingsData(await request("/sources/refresh", signal, "POST", {}));
+}
+
+function decodeTariff(value: Record<string, unknown>): TariffOption {
+  return {
+    tariff_key: nullable(value.tariff_key, string),
+    tariff_names: Object.fromEntries(Object.entries(record(value.tariff_names)).map(([key, name]) => [key, string(name)])),
+    is_configured: boolean(value.is_configured),
+    is_enabled: nullable(value.is_enabled, boolean),
+  };
+}
+
+function decodeProfile(value: unknown): MatchProfile {
+  const profile = record(value);
+  const premium = record(profile.premium_traffic);
+  const plan = profile.subscription_plan === null ? null : record(profile.subscription_plan);
+  return {
+    user_id: integer(profile.user_id),
+    minishop_id: nullable(profile.minishop_id, string),
+    telegram_id: nullable(profile.telegram_id, integer),
+    first_name: nullable(profile.first_name, string),
+    last_name: nullable(profile.last_name, string),
+    username: nullable(profile.username, string),
+    email: nullable(profile.email, string),
+    avatar_url: nullable(profile.avatar_url, string),
+    telegram_photo_url: nullable(profile.telegram_photo_url, string),
+    registration_date: nullable(profile.registration_date, string),
+    is_banned: boolean(profile.is_banned),
+    panel_status: nullable(profile.panel_status, string),
+    panel_status_expired_at: nullable(profile.panel_status_expired_at, string),
+    subscription_expires_at: nullable(profile.subscription_expires_at, string),
+    subscription_plan: plan === null ? null : {
+      ...decodeTariff(plan),
+      kind: choice(plan.kind, ["trial", "tariff", "unassigned"]),
+      is_active: boolean(plan.is_active),
+    },
+    premium_traffic: {
+      state: choice(premium.state, ["none", "unlimited", "good", "warn", "critical"]),
+      used_bytes: premium.used_bytes == null ? 0 : integer(premium.used_bytes),
+      limit_bytes: premium.limit_bytes == null ? null : integer(premium.limit_bytes),
+    },
+    payments_total_amount: Number(profile.payments_total_amount),
+    payments_count: integer(profile.payments_count),
+    payments_currency: nullable(profile.payments_currency, string),
+    invited_users_count: integer(profile.invited_users_count),
+    user_balance_amount_minor: integer(profile.user_balance_amount_minor),
+    partner_balance_amount_minor: integer(profile.partner_balance_amount_minor),
+  };
+}
+
+export async function getMatches(
+  limit: number, offset: number, signal: AbortSignal, filters?: MatchFilters,
+): Promise<MatchPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset), ...filters });
+  const payload = await request(`/matches?${params}`, signal);
   return {
     enabled: boolean(payload.enabled),
     rows: array(payload.rows, (value) => {
@@ -173,9 +280,15 @@ export async function getMatches(limit: number, offset: number, signal: AbortSig
         telegramId: string(row.telegramId),
         name: nullable(row.name, string),
         username: nullable(row.username, string),
+        profile: row.profile == null ? null : decodeProfile(row.profile),
       };
     }),
     total: integer(payload.total),
+    user_balance_enabled: payload.user_balance_enabled === true,
+    partner_balance_enabled: payload.partner_balance_enabled === true,
+    balance_currency: payload.balance_currency == null ? "RUB" : string(payload.balance_currency),
+    balance_currency_scale: payload.balance_currency_scale == null ? 2 : integer(payload.balance_currency_scale),
+    tariff_options: array(payload.tariff_options ?? [], (value) => decodeTariff(record(value))),
   };
 }
 

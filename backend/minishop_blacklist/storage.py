@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
-from db.models import User
-from sqlalchemy import and_, delete, func, insert, or_, select, true
+from sqlalchemy import and_, delete, insert, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .settings import DisplaySettings, Settings
@@ -143,57 +142,25 @@ async def get_matches(session: AsyncSession, telegram_ids: Sequence[int]) -> dic
     }
 
 
-async def list_matched_users(
-    session: AsyncSession, *, limit: int, offset: int
-) -> tuple[list[tuple[User, Match]], int]:
-    matched_accounts = (
-        select(User.user_id)
-        .where(User.telegram_id.in_(select(Entry.telegram_id)))
-        .cte("blacklist_accounts")
-    )
-    total_accounts = select(func.count().label("total")).select_from(matched_accounts).subquery()
-    page = (
-        select(matched_accounts.c.user_id)
-        .order_by(matched_accounts.c.user_id.desc())
-        .limit(limit)
-        .offset(offset)
-        .subquery()
-    )
-    # Start from the total so an offset past the final page still returns the count.
-    rows = (
-        await session.execute(
-            select(User, Entry.reasons, Source.last_error, total_accounts.c.total)
-            .select_from(total_accounts)
-            .outerjoin(page, true())
-            .outerjoin(User, User.user_id == page.c.user_id)
-            .outerjoin(Entry, Entry.telegram_id == User.telegram_id)
-            .outerjoin(Source, Source.id == Entry.source_id)
-            .order_by(User.user_id.desc(), Source.position, Source.id)
-        )
-    ).all()
-    grouped: dict[User, list[tuple[Reason, ...]]] = {}
-    stale_accounts: set[User] = set()
-    for user, reasons, error, _ in rows:
-        if user is not None:
-            grouped.setdefault(user, []).append(_snapshot_reasons(reasons))
-            if error is not None:
-                stale_accounts.add(user)
-    result = [
-        (user, Match("match", merge_reasons(reasons), stale=user in stale_accounts))
-        for user, reasons in grouped.items()
-    ]
-    return result, int(rows[0][3])
-
-
 async def claim_due_sources(session: AsyncSession, now: datetime) -> list[RefreshLease]:
-    hours = await session.scalar(select(Configuration.refresh_hours).where(Configuration.id == 1))
-    if hours is None:
+    schedule = (
+        await session.execute(
+            select(Configuration.refresh_hours, Configuration.refresh_requested_at).where(
+                Configuration.id == 1
+            )
+        )
+    ).one_or_none()
+    if schedule is None:
         raise RuntimeError("blacklist configuration migration is missing")
+    hours, requested_at = schedule
     cutoff = now - timedelta(hours=hours)
+    due = [Source.last_attempt_at.is_(None), Source.last_attempt_at <= cutoff]
+    if requested_at is not None:
+        due.append(Source.last_attempt_at < requested_at)
     sources = await session.scalars(
         select(Source)
         .where(
-            or_(Source.last_attempt_at.is_(None), Source.last_attempt_at <= cutoff),
+            or_(*due),
             or_(Source.lease_until.is_(None), Source.lease_until <= now),
         )
         .order_by(Source.position, Source.id)
@@ -206,6 +173,34 @@ async def claim_due_sources(session: AsyncSession, now: datetime) -> list[Refres
         source.lease_until = now + _REFRESH_LEASE
         leases.append(RefreshLease(source.id, source.url, token))
     return leases
+
+
+async def source_refresh_pending(session: AsyncSession) -> bool:
+    awaiting_download = (
+        select(Source.id)
+        .join(Configuration, Configuration.id == 1)
+        .where(
+            Configuration.refresh_requested_at.is_not(None),
+            or_(
+                Source.last_attempt_at.is_(None),
+                Source.last_attempt_at < Configuration.refresh_requested_at,
+            ),
+        )
+    )
+    return bool(await session.scalar(select(awaiting_download.exists())))
+
+
+async def request_source_refresh(session: AsyncSession) -> None:
+    configuration = await session.get(
+        Configuration, 1, with_for_update=True, populate_existing=True
+    )
+    if configuration is None:
+        raise RuntimeError("blacklist configuration migration is missing")
+    if await source_refresh_pending(session):
+        return
+    if await session.scalar(select(Source.id).limit(1)) is not None:
+        configuration.refresh_requested_at = datetime.now(UTC)
+        await session.flush()
 
 
 async def record_refresh(

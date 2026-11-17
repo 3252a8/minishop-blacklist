@@ -1,4 +1,4 @@
-import { AREAS, EVENTS, getSettings, putSettings } from "./api";
+import { AREAS, EVENTS, getSettings, putSettings, startSourceRefresh } from "./api";
 import type { Settings, SettingsData } from "./api";
 import { button, element, errorState, errorText, language, root, stateMessage, translator } from "./ui";
 import type { Props, Translate, View } from "./ui";
@@ -66,16 +66,21 @@ function checkGroup(title: string): HTMLFieldSetElement {
 
 export class SettingsView implements View {
   private readonly node: HTMLElement;
+  private readonly sourceSection = element("section", undefined, "blacklist-sources");
   private readonly controller = new AbortController();
   private data: SettingsData | null = null;
   private draft: Draft | null = null;
-  private operation: "load" | "status" | "save" | null = null;
-  private feedback: { operation: "load" | "status" | "save"; error: unknown } | null = null;
+  private operation: "load" | "refresh" | "save" | null = null;
+  private feedback: { operation: "load" | "refresh" | "save"; error: unknown } | null = null;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshRead: AbortController | null = null;
+  private refreshFeedback: { error: unknown } | null = null;
+  private refreshFinished = false;
   private saved = false;
 
   constructor(target: HTMLElement, private props: Props) {
     this.node = root(target);
-    void this.load("load");
+    void this.load();
   }
 
   update(props: Props): void {
@@ -86,15 +91,59 @@ export class SettingsView implements View {
 
   destroy(): void {
     this.controller.abort();
+    this.stopPolling();
     this.node.remove();
   }
 
-  private async load(operation: "load" | "status"): Promise<void> {
-    await this.run(operation, async () => {
+  private async load(): Promise<void> {
+    await this.run("load", async () => {
       const data = await getSettings(this.controller.signal);
-      if (operation === "load") this.draft = draftFrom(data.settings);
+      this.draft = draftFrom(data.settings);
       this.data = data;
     });
+  }
+
+  private async refreshSources(): Promise<void> {
+    await this.run("refresh", async () => {
+      const data = await startSourceRefresh(this.controller.signal);
+      this.data = data;
+      this.refreshFinished = !data.refreshPending;
+    });
+  }
+
+  private stopPolling(): void {
+    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
+    this.refreshRead?.abort();
+    this.refreshRead = null;
+  }
+
+  private schedulePoll(): void {
+    if (!this.data?.refreshPending || this.operation || this.controller.signal.aborted) return;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      void this.pollRefresh();
+    }, this.refreshFeedback ? 4_000 : 1_000);
+  }
+
+  private async pollRefresh(): Promise<void> {
+    const request = new AbortController();
+    this.refreshRead = request;
+    try {
+      const data = await getSettings(request.signal);
+      if (request.signal.aborted) return;
+      this.data = data;
+      this.refreshFinished = !data.refreshPending;
+      this.refreshFeedback = null;
+    } catch (error) {
+      if (!request.signal.aborted) this.refreshFeedback = { error };
+    } finally {
+      if (this.refreshRead === request) {
+        this.refreshRead = null;
+        if (this.data) this.renderSourceList(this.data, translator(this.props));
+        this.schedulePoll();
+      }
+    }
   }
 
   private async save(draft: Draft): Promise<void> {
@@ -113,10 +162,13 @@ export class SettingsView implements View {
     });
   }
 
-  private async run(operation: "load" | "status" | "save", action: () => Promise<void>): Promise<void> {
+  private async run(operation: "load" | "refresh" | "save", action: () => Promise<void>): Promise<void> {
     if (this.operation || this.controller.signal.aborted) return;
+    this.stopPolling();
     this.operation = operation;
     this.feedback = null;
+    this.refreshFeedback = null;
+    this.refreshFinished = false;
     this.saved = false;
     const focus = this.node.contains(document.activeElement);
     this.render();
@@ -128,8 +180,9 @@ export class SettingsView implements View {
       this.operation = null;
       if (!this.controller.signal.aborted) {
         this.render();
+        this.schedulePoll();
         if (focus && document.activeElement === document.body) {
-          const control = operation === "save" ? "save" : "sourceStatus";
+          const control = operation === "save" ? "save" : "sourceRefresh";
           this.node.querySelector<HTMLButtonElement>(`button[name="${control}"]`)?.focus();
         }
       }
@@ -219,17 +272,25 @@ export class SettingsView implements View {
     return form;
   }
 
-  private sourceList(data: SettingsData, t: Translate): HTMLElement {
-    const section = element("section", undefined, "blacklist-sources");
+  private renderSourceList(data: SettingsData, t: Translate): void {
+    const section = this.sourceSection;
+    section.replaceChildren();
     const toolbar = element("div", undefined, "blacklist-toolbar");
-    const refresh = button(t("update_status"), () => { void this.load("status"); });
-    refresh.name = "sourceStatus";
-    refresh.disabled = this.operation !== null;
+    const pending = data.refreshPending || this.operation === "refresh";
+    const refresh = button(t(pending ? "sources_refreshing" : "refresh_sources"), () => {
+      void this.refreshSources();
+    });
+    refresh.name = "sourceRefresh";
+    refresh.disabled = pending || this.operation !== null || !data.sourceStatuses.length;
     toolbar.append(element("h3", t("source_statuses")), refresh);
     section.append(toolbar);
+    if (this.refreshFeedback) {
+      section.append(stateMessage(errorText(t, this.refreshFeedback.error, "request_failed"), "alert"));
+    }
+    if (this.refreshFinished) section.append(stateMessage(t("sources_refresh_finished")));
     if (!data.sourceStatuses.length) {
       section.append(stateMessage(t("source_none")));
-      return section;
+      return;
     }
 
     const date = new Intl.DateTimeFormat(language(this.props), { dateStyle: "medium", timeStyle: "short" });
@@ -256,7 +317,6 @@ export class SettingsView implements View {
       list.append(item);
     }
     section.append(list);
-    return section;
   }
 
   private render(): void {
@@ -265,7 +325,7 @@ export class SettingsView implements View {
     this.node.setAttribute("aria-busy", String(this.operation !== null));
     if (!this.data || !this.draft) {
       this.node.append(this.feedback
-        ? errorState(t, this.feedback.error, () => { void this.load("load"); })
+        ? errorState(t, this.feedback.error, () => { void this.load(); })
         : stateMessage(t("loading")));
       return;
     }
@@ -275,6 +335,7 @@ export class SettingsView implements View {
       this.node.append(stateMessage(errorText(t, this.feedback.error, key), "alert"));
     }
     if (this.saved) this.node.append(stateMessage(t("saved")));
-    this.node.append(this.form(this.draft, t), this.sourceList(this.data, t));
+    this.renderSourceList(this.data, t);
+    this.node.append(this.form(this.draft, t), this.sourceSection);
   }
 }

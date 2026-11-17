@@ -58,9 +58,9 @@ test("settings keep the draft through validation failures and save all selected 
       if (++submissions === 1) {
         return Response.json({ ok: false, error: "chat_required" }, { status: 400 });
       }
-      return Response.json({ ok: true, settings: submitted, sourceStatuses });
+      return Response.json({ ok: true, settings: submitted, sourceStatuses, refreshPending: false });
     }
-    return Response.json({ ok: true, settings, sourceStatuses });
+    return Response.json({ ok: true, settings, sourceStatuses, refreshPending: false });
   });
   const translatedKeys = [];
   const instance = mountView("settings", target, {
@@ -113,6 +113,49 @@ test("settings keep the draft through validation failures and save all selected 
   assert.match(target.textContent, /Настройки сохранены/u);
   unmountView(instance);
   assert.equal(target.childElementCount, 0);
+});
+
+test("manual refresh uses the worker and updates statuses without replacing unsaved settings", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let refreshStarted = false;
+  let statusRequests = 0;
+  const { target, event } = fixture(t, async (path, options) => {
+    if (options.method === "POST") {
+      assert.equal(path, "/api/admin/minishop-blacklist/sources/refresh");
+      assert.equal(options.headers["X-CSRF-Token"], "fixture-token");
+      refreshStarted = true;
+      return Response.json({ ok: true, settings, sourceStatuses, refreshPending: true });
+    }
+    assert.equal(path, "/api/admin/minishop-blacklist/settings");
+    statusRequests += 1;
+    const statuses = refreshStarted ? [{ ...sourceStatuses[0], lastError: "source_timeout" }] : sourceStatuses;
+    return Response.json({ ok: true, settings, sourceStatuses: statuses, refreshPending: false });
+  });
+
+  const instance = mountView("settings", target, {});
+  await setImmediate();
+  const refresh = () => target.querySelector('[name="sourceRefresh"]');
+  assert.equal(refresh().textContent, "Обновить списки");
+  refresh().click();
+  await setImmediate();
+  assert.ok(refreshStarted);
+  assert.equal(refresh().disabled, true);
+  assert.equal(refresh().textContent, "Списки обновляются…");
+
+  const draft = target.querySelector('[name="refreshHours"]');
+  assert.equal(draft.disabled, false);
+  draft.value = "6";
+  draft.dispatchEvent(event("input"));
+  t.mock.timers.tick(1_000);
+  await setImmediate();
+
+  assert.equal(statusRequests, 2);
+  assert.equal(target.querySelector('[name="refreshHours"]'), draft);
+  assert.equal(draft.value, "6");
+  assert.match(target.textContent, /Обновление списков завершено/u);
+  assert.match(target.textContent, /Не удалось обновить список/u);
+  assert.equal(refresh().disabled, false);
+  unmountView(instance);
 });
 
 test("a ticket shows every distinct comment and opens safe evidence links in new tabs", async (t) => {

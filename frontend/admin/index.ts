@@ -1,3 +1,4 @@
+import { DiagnosticsView } from "./diagnostics";
 import { MatchesView } from "./matches";
 import { SettingsView } from "./settings";
 import { StatusView } from "./status";
@@ -7,6 +8,7 @@ import "./styles.css";
 export function mountView(view: string, target: HTMLElement, props: Props): View {
   switch (view) {
     case "settings": return new SettingsView(target, props);
+    case "diagnostics": return new DiagnosticsView(target, props);
     case "matched-users": return new MatchesView(target, props);
     case "user-status": return new StatusView(target, props, "userCard");
     case "ticket-status": return new StatusView(target, props, "ticket");

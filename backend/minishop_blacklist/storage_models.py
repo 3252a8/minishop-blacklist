@@ -25,6 +25,7 @@ class Configuration(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     refresh_hours: Mapped[int]
+    refresh_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     users_visible: Mapped[bool]
     user_card_visible: Mapped[bool]
     ticket_visible: Mapped[bool]

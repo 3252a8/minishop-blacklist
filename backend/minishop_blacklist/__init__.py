@@ -9,10 +9,11 @@ from db.migrator import Migration
 
 from .alerts import PLUGIN_ID, alert_contributions, subscribe_to_events
 from .api import setup_routes
+from .diagnostic_api import setup_diagnostic_routes
 from .migrations import migrations
 from .worker import run_refresh_worker
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 class BlacklistPlugin(Plugin):
@@ -34,6 +35,7 @@ class BlacklistPlugin(Plugin):
     def setup_web(self, ctx: PluginContext, app: web.Application, *, scope: str) -> None:
         if scope == WEB_SCOPE_WEBAPP:
             setup_routes(app)
+            setup_diagnostic_routes(app)
 
     def locales_dir(self) -> Path:
         packaged = Path(__file__).parent / "locales"

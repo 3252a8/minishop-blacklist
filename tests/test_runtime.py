@@ -25,6 +25,7 @@ from db.dal import payment_dal, subscription_dal
 from db.migrator import run_migration_chains
 from db.models import Subscription, User
 from minishop_blacklist import plugin
+from minishop_blacklist.refresh import refresh_sources
 from minishop_blacklist.sources import parse_source
 from minishop_blacklist.storage import claim_due_sources, record_refresh
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -32,6 +33,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 _BASE = "/api/admin/minishop-blacklist"
 _CUSTOMER_ID = -301
 _TELEGRAM_ID = 998877661
+_OTHER_TELEGRAM_ID = 898877661
 
 
 class Telegram:
@@ -133,7 +135,8 @@ async def _configure(ctx: PluginContext, client: TestClient) -> dict[str, object
             now,
             snapshot=parse_source(
                 f"{_TELEGRAM_ID} # Причина А https://example.org/one\n"
-                f"{_TELEGRAM_ID} # Причина Б\n".encode()
+                f"{_TELEGRAM_ID} # Причина Б\n"
+                f"{_OTHER_TELEGRAM_ID} # Другой пользователь\n".encode()
             ),
         )
         await record_refresh(
@@ -193,6 +196,51 @@ async def test_settings_and_statuses_require_admin_and_current_visibility(runtim
 
 
 @pytest.mark.asyncio
+async def test_native_filters_and_manual_refresh(runtime, monkeypatch) -> None:
+    ctx, _bot = runtime
+    app_factory = ctx.require_session_factory()
+    async with await _client(ctx) as client:
+        await _configure(ctx, client)
+        headers = _auth(ctx.settings, 200)
+        async with app_factory.begin() as session:
+            session.add(User(user_id=909, telegram_id=_OTHER_TELEGRAM_ID, first_name="Zulu"))
+            session.add(User(user_id=910, telegram_id=777000, first_name="Zzz", referred_by_id=909))
+
+        result = await client.get(f"{_BASE}/matches?sort=name_desc&limit=1", headers=headers)
+        page = await result.json()
+        assert page["total"] == 2
+        assert page["rows"][0]["telegramId"] == str(_OTHER_TELEGRAM_ID)
+        assert page["rows"][0]["profile"]["invited_users_count"] == 1
+        assert page["rows"][0]["profile"]["panel_status"] == "bot_only"
+        result = await client.get(f"{_BASE}/matches?sort=name_desc&offset=1", headers=headers)
+        assert (await result.json())["rows"][0]["telegramId"] == str(_TELEGRAM_ID)
+        result = await client.get(f"{_BASE}/matches?q={_TELEGRAM_ID}&limit=1", headers=headers)
+        assert (await result.json())["total"] == 1
+        result = await client.get(f"{_BASE}/matches?filter=no_tg", headers=headers)
+        assert (await result.json())["total"] == 0
+
+        denied = await client.post(
+            f"{_BASE}/sources/refresh", headers=_auth(ctx.settings, _CUSTOMER_ID), json={}
+        )
+        assert denied.status == 403
+        assert await refresh_sources(app_factory) == 0
+        result = await client.post(f"{_BASE}/sources/refresh", headers=headers, json={})
+        assert (await result.json())["refreshPending"] is True
+
+        async def fetch(_url: str):
+            return parse_source(f"{_TELEGRAM_ID} # Обновлённый комментарий\n".encode())
+
+        monkeypatch.setattr("minishop_blacklist.refresh.fetch_source", fetch)
+        assert await refresh_sources(app_factory) == 2
+        result = await client.get(f"{_BASE}/settings", headers=headers)
+        assert (await result.json())["refreshPending"] is False
+        result = await client.get(f"{_BASE}/matches", headers=headers)
+        page = await result.json()
+        assert page["total"] == 1
+        assert page["rows"][0]["reasons"] == [{"text": "Обновлённый комментарий", "links": []}]
+
+
+@pytest.mark.asyncio
 async def test_four_event_categories_use_target_topic_and_ignore_duplicates(runtime) -> None:
     ctx, bot = runtime
     async with await _client(ctx) as client:
@@ -203,7 +251,8 @@ async def test_four_event_categories_use_target_topic_and_ignore_duplicates(runt
             user_id=_CUSTOMER_ID,
             panel_user_uuid="trial",
             end_date=now + timedelta(days=1),
-            status_from_panel="TRIAL",
+            status_from_panel="ACTIVE",
+            provider="trial",
         )
         expired = Subscription(user_id=_CUSTOMER_ID, panel_user_uuid="expired", end_date=now)
         session.add_all([active_trial, expired])
@@ -257,3 +306,163 @@ async def test_four_event_categories_use_target_topic_and_ignore_duplicates(runt
         assert message["chat_id"] == -1001234567890
         assert message["message_thread_id"] == 5
         assert "&lt;Tester&gt;" in message["text"] and "&lt;причина В&gt;" in message["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_diagnostics_see_payload_skip_and_result(runtime) -> None:
+    ctx, bot = runtime
+    path = f"{_BASE}/diagnostics"
+    headers = _auth(ctx.settings, 200)
+    async with await _client(ctx) as client:
+        assert (await client.get(path)).status == 401
+        assert (await client.get(path, headers=_auth(ctx.settings, _CUSTOMER_ID))).status == 403
+        await _configure(ctx, client)
+        initial = await (await client.get(path, headers=headers)).json()
+        assert initial == {
+            "ok": True,
+            "enabled": False,
+            "chatId": "-1001234567890",
+            "topicId": "5",
+            "entries": [],
+            "nextBeforeId": None,
+        }
+        response = await client.post(f"{path}/test", headers=headers, json={})
+        assert response.status == 400 and (await response.json())["error"] == "debug_disabled"
+
+        response = await client.put(path, headers=headers, json={"enabled": True})
+        assert await response.json() == {"ok": True, "enabled": True}
+        await events.emit(events.USER_REGISTERED, {"user_id": _CUSTOMER_ID})
+        real_event = {"user_id": _CUSTOMER_ID, "telegram_id": _TELEGRAM_ID}
+        await events.emit(events.USER_REGISTERED, real_event)
+        await events.emit(events.USER_REGISTERED, real_event)
+        queued = await (await client.post(f"{path}/test", headers=headers, json={})).json()
+        assert queued["ok"]
+        while await run_once(ctx):
+            pass
+
+        page = await (await client.get(path, headers=headers, params={"limit": "2"})).json()
+        assert len(page["entries"]) == 2 and page["nextBeforeId"]
+        older = await (
+            await client.get(path, headers=headers, params={"beforeId": page["nextBeforeId"]})
+        ).json()
+        entries = page["entries"] + older["entries"]
+        assert len({entry["id"] for entry in entries}) == len(entries)
+        assert {entry["reason"] for entry in entries if entry["status"] == "skipped"} == {
+            "telegram_unlinked",
+            "duplicate",
+        }
+        recorded_test = {
+            entry["status"]: entry
+            for entry in entries
+            if entry["operationId"] == queued["operationId"]
+        }
+        assert set(recorded_test) == {"queued", "sending", "sent"}
+        assert recorded_test["sent"]["response"]["message_id"] == 2
+        assert recorded_test["sending"]["request"] == {
+            "chat_id": -1001234567890,
+            "message_thread_id": 5,
+            "text": bot.sent[1]["text"],
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        live = next(
+            entry for entry in entries if entry["event"] == "register" and entry["status"] == "sent"
+        )
+        assert live["telegramId"] == str(_TELEGRAM_ID)
+        assert "&lt;Tester&gt;" in live["request"]["text"]
+        assert (
+            live["request"]["reply_markup"]["inline_keyboard"][0][0]["url"]
+            == f"tg://user?id={_TELEGRAM_ID}"
+        )
+
+        await client.put(path, headers=headers, json={"enabled": False})
+        await events.emit(events.USER_REGISTERED, {"user_id": _CUSTOMER_ID})
+        unchanged = await (await client.get(path, headers=headers)).json()
+        assert not unchanged["enabled"] and unchanged["entries"] == entries
+        assert (await client.delete(path, headers=headers)).status == 200
+        cleared = await (await client.get(path, headers=headers)).json()
+        assert not cleared["entries"]
+
+
+@pytest.mark.asyncio
+async def test_test_notification_reports_telegram_error_without_raw_provider_detail(
+    runtime, monkeypatch
+) -> None:
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    ctx, bot = runtime
+    path = f"{_BASE}/diagnostics"
+    headers = _auth(ctx.settings, 200)
+
+    async def rejected(**message):
+        raise TelegramBadRequest(
+            SendMessage(chat_id=message["chat_id"], text=message["text"]),
+            "Bad Request: message thread not found at https://example.test/secret-token",
+        )
+
+    monkeypatch.setattr(bot, "send_message", rejected)
+    async with await _client(ctx) as client:
+        await _configure(ctx, client)
+        await client.put(path, headers=headers, json={"enabled": True})
+        await client.post(f"{path}/test", headers=headers, json={})
+        assert await run_once(ctx)
+        assert not await run_once(ctx)
+        body = await (await client.get(path, headers=headers)).json()
+        last = body["entries"][0]
+        assert last["status"] == "error"
+        assert last["reason"] == "telegram_topic_not_found"
+        assert last["response"] == {
+            "type": "TelegramBadRequest",
+            "detail": "Message thread not found",
+        }
+        assert "secret-token" not in str(body)
+
+
+@pytest.mark.asyncio
+async def test_telegram_diagnostics_keep_the_latest_300_entries(runtime) -> None:
+    from minishop_blacklist.diagnostics import (
+        DiagnosticEntry,
+        DiagnosticTrace,
+        list_diagnostics,
+        set_debug_enabled,
+    )
+    from sqlalchemy import insert
+
+    ctx, _ = runtime
+    factory = ctx.require_session_factory()
+    async with factory.begin() as session:
+        await set_debug_enabled(session, True)
+        await session.execute(
+            insert(DiagnosticEntry), [{"event": "test", "status": "queued"}] * 300
+        )
+    await DiagnosticTrace("trial").persist(factory, "skipped", "no_match")
+    async with factory.begin() as session:
+        entries, cursor = await list_diagnostics(session, limit=300, before_id=None)
+        assert cursor is None and len(entries) == 300
+        assert entries[0].id == 301 and entries[0].reason == "no_match"
+        assert entries[-1].id == 2
+
+
+def test_telegram_diagnostics_redact_button_credentials_and_keep_public_deep_links() -> None:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from minishop_blacklist.telegram_delivery import TelegramMessage
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Sensitive link",
+                    url="https://user:private@example.test/path?k=secret#token",
+                ),
+                InlineKeyboardButton(
+                    text="Public link", url="https://t.me/minishop_bot?start=admin_user_30"
+                ),
+            ]
+        ]
+    )
+    payload = TelegramMessage(-1001234567890, None, "<b>Test</b>", keyboard).trace_payload()
+    assert payload["reply_markup"]["inline_keyboard"][0] == [
+        {"text": "Sensitive link", "url": "https://example.test/path?[redacted]#[redacted]"},
+        {"text": "Public link", "url": "https://t.me/minishop_bot?start=admin_user_30"},
+    ]

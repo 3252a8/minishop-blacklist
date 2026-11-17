@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from aiohttp import web
 from bot.app.web.admin_api_impl.auth import _require_admin_user_id
 from bot.app.web.context import get_session_factory
+from bot.app.web.context import get_settings as get_host_settings
 
+from .matched_profiles import load_matched_profiles
+from .matches_query import query_matched_users
 from .settings import (
     EVENT_NAMES,
     MAX_REFRESH_HOURS,
@@ -23,9 +27,10 @@ from .storage import (
     SourceStatus,
     get_matches,
     get_settings,
-    list_matched_users,
     list_source_statuses,
+    request_source_refresh,
     save_settings,
+    source_refresh_pending,
 )
 
 _BASE = "/api/admin/minishop-blacklist"
@@ -118,7 +123,9 @@ def _guard(
     return guarded
 
 
-def _settings_record(settings: Settings, statuses: list[SourceStatus]) -> web.Response:
+def _settings_record(
+    settings: Settings, statuses: list[SourceStatus], refresh_pending: bool
+) -> web.Response:
     return _response(
         settings={
             "sources": settings.sources,
@@ -132,6 +139,7 @@ def _settings_record(settings: Settings, statuses: list[SourceStatus]) -> web.Re
             "topicId": str(settings.topic_id) if settings.topic_id is not None else None,
             "events": settings.events,
         },
+        refreshPending=refresh_pending,
         sourceStatuses=[
             {
                 "url": item.url,
@@ -158,8 +166,9 @@ def _match_record(match: Match) -> dict[str, object]:
 async def read_settings(request: web.Request) -> web.Response:
     async with get_session_factory(request)() as session:
         settings = await get_settings(session)
+        refresh_pending = await source_refresh_pending(session)
         statuses = await list_source_statuses(session)
-    return _settings_record(settings, statuses)
+    return _settings_record(settings, statuses, refresh_pending)
 
 
 @_guard
@@ -167,9 +176,21 @@ async def update_settings(request: web.Request) -> web.Response:
     settings = parse_settings(await _body(request))
     async with get_session_factory(request)() as session:
         await save_settings(session, settings)
+        refresh_pending = await source_refresh_pending(session)
         statuses = await list_source_statuses(session)
         await session.commit()
-    return _settings_record(settings, statuses)
+    return _settings_record(settings, statuses, refresh_pending)
+
+
+@_guard
+async def refresh_lists(request: web.Request) -> web.Response:
+    async with get_session_factory(request)() as session:
+        await request_source_refresh(session)
+        settings = await get_settings(session)
+        refresh_pending = await source_refresh_pending(session)
+        statuses = await list_source_statuses(session)
+        await session.commit()
+    return _settings_record(settings, statuses, refresh_pending)
 
 
 @_guard
@@ -180,23 +201,50 @@ async def matches(request: web.Request) -> web.Response:
     offset = request.query.get("offset", "0")
     if limit is None or not re.fullmatch(r"[0-9]{1,10}", offset) or int(offset) > _MAX_INT32:
         raise InvalidRequest("invalid_pagination")
+    query = request.query.get("q", "").strip()
+    if len(query) > 256:
+        raise InvalidRequest("invalid_search")
+    tariff = request.query.get("tariff_filter", "all")
+    if tariff not in {"all", "trial", "no_subscription", "no_tariff"} and not (
+        tariff.startswith("tariff:") and tariff.removeprefix("tariff:") and len(tariff) <= 256
+    ):
+        raise InvalidRequest("invalid_tariff_filter")
 
+    host_settings = get_host_settings(request)
+    now = datetime.now(UTC)
     async with get_session_factory(request)() as session:
+        # Keep the selected accounts, total and comments on the same source snapshot.
+        await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         settings = await get_settings(session)
         if not settings.display.users:
             return _response(enabled=False, rows=[], total=0)
-        rows, total = await list_matched_users(session, limit=limit, offset=int(offset))
+        users, total = await query_matched_users(
+            session,
+            host_settings,
+            limit=limit,
+            offset=int(offset),
+            query=query,
+            filter_value=request.query.get("filter", "all"),
+            panel_status=request.query.get("panel_status", "all"),
+            premium_traffic=request.query.get("premium_traffic", "all"),
+            sort=request.query.get("sort", "registered_desc"),
+            tariff_filter=tariff,
+            now=now,
+        )
+        profiles, meta = await load_matched_profiles(session, users, host_settings, now=now)
+        matched = await get_matches(session, [int(user.telegram_id) for user in users])
         result = [
             {
-                **_match_record(match),
+                **_match_record(matched[int(user.telegram_id)]),
+                "profile": profiles[int(user.user_id)],
                 "userId": str(user.minishop_id or user.user_id),
                 "telegramId": str(user.telegram_id),
                 "name": " ".join(filter(None, (user.first_name, user.last_name))) or None,
                 "username": user.username,
             }
-            for user, match in rows
+            for user in users
         ]
-    return _response(enabled=True, rows=result, total=total)
+    return _response(enabled=True, rows=result, total=total, **meta)
 
 
 @_guard
@@ -226,5 +274,6 @@ async def statuses(request: web.Request) -> web.Response:
 def setup_routes(app: web.Application) -> None:
     app.router.add_get(f"{_BASE}/settings", read_settings)
     app.router.add_put(f"{_BASE}/settings", update_settings)
+    app.router.add_post(f"{_BASE}/sources/refresh", refresh_lists)
     app.router.add_get(f"{_BASE}/matches", matches)
     app.router.add_post(f"{_BASE}/status", statuses)

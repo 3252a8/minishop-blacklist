@@ -134,14 +134,11 @@
   color: var(--danger-text, #aa2727);
 }
 
-.minishop-blacklist :is(.blacklist-toolbar, .blacklist-pagination, .blacklist-identity) {
+.minishop-blacklist .blacklist-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-}
-
-.minishop-blacklist .blacklist-toolbar {
   justify-content: space-between;
 }
 
@@ -201,63 +198,4 @@
 
 .minishop-blacklist .blacklist-source-link:hover {
   border-color: var(--accent, #087247);
-}
-
-.minishop-blacklist .blacklist-results {
-  overflow-x: auto;
-  border: 1px solid var(--border, #ccd3da);
-  border-radius: var(--radius-card, 8px);
-}
-
-.minishop-blacklist table {
-  width: 100%;
-  min-width: 26rem;
-  border-collapse: collapse;
-  background: var(--panel, #fff);
-}
-
-.minishop-blacklist :is(th, td) {
-  border-block-end: 1px solid var(--border, #ccd3da);
-  padding: 10px 12px;
-  text-align: start;
-  vertical-align: top;
-}
-
-.minishop-blacklist th {
-  background: var(--surface-muted, #f8fafb);
-}
-
-.minishop-blacklist tbody tr:last-child td {
-  border-block-end: 0;
-}
-
-.minishop-blacklist .blacklist-identity a {
-  color: inherit;
-  font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
-}
-
-.minishop-blacklist .blacklist-id {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  white-space: nowrap;
-}
-
-@media (max-width: 620px) {
-  .minishop-blacklist table {
-    min-width: 0;
-    table-layout: fixed;
-  }
-
-  .minishop-blacklist :is(th, td) {
-    padding: 8px 6px;
-  }
-
-  .minishop-blacklist th:nth-child(2) {
-    width: min(36%, 8.5rem);
-  }
-
-  .minishop-blacklist .blacklist-id {
-    white-space: normal;
-  }
 }

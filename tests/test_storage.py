@@ -5,7 +5,6 @@ from uuid import uuid4
 
 import pytest
 from db.migrator.engine import run_migration_chains
-from db.models import User
 from minishop_blacklist.migrations import migrations
 from minishop_blacklist.settings import DEFAULT_SETTINGS
 from minishop_blacklist.sources import Reason, parse_source
@@ -14,17 +13,18 @@ from minishop_blacklist.storage import (
     claim_due_sources,
     get_matches,
     get_settings,
-    list_matched_users,
     list_source_statuses,
     record_refresh,
+    request_source_refresh,
     save_settings,
+    source_refresh_pending,
 )
-from sqlalchemy import insert, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest.mark.asyncio
-async def test_source_leases_snapshots_and_pagination() -> None:
+async def test_source_leases_and_snapshots() -> None:
     database = os.environ.get("MINISHOP_BLACKLIST_TEST_DATABASE")
     if not database:
         pytest.skip("MINISHOP_BLACKLIST_TEST_DATABASE is not set")
@@ -37,22 +37,20 @@ async def test_source_leases_snapshots_and_pagination() -> None:
     try:
         async with admin.begin() as connection:
             await connection.execute(text(f"CREATE SCHEMA {schema}"))
+        chain = migrations()
         async with engine.begin() as connection:
-            await connection.run_sync(User.__table__.create)
-            await connection.run_sync(run_migration_chains, {"minishop-blacklist": migrations()})
+            await connection.run_sync(run_migration_chains, {"minishop-blacklist": chain[:1]})
             await connection.execute(
-                insert(User.__table__),
-                [
-                    {"user_id": 1, "telegram_id": 1001},
-                    {"user_id": 2, "telegram_id": 1002},
-                    {"user_id": 3, "telegram_id": None},
-                ],
+                text("UPDATE ext_minishop_blacklist_settings SET refresh_hours = 36")
             )
+        async with engine.begin() as connection:
+            await connection.run_sync(run_migration_chains, {"minishop-blacklist": chain})
 
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         now = datetime(2026, 1, 1, tzinfo=UTC)
         async with sessions.begin() as session:
-            assert await get_settings(session) == DEFAULT_SETTINGS
+            assert await get_settings(session) == replace(DEFAULT_SETTINGS, refresh_hours=36)
+            await save_settings(session, DEFAULT_SETTINGS)
             assert await get_matches(session, [1001]) == {1001: Match("unknown")}
             first, second = await claim_due_sources(session, now)
             async with sessions.begin() as competing:
@@ -73,14 +71,6 @@ async def test_source_leases_snapshots_and_pagination() -> None:
                 1001: Match("match", (Reason("first"), Reason("second"))),
                 1003: Match("clear"),
             }
-            rows, count = await list_matched_users(session, limit=1, offset=0)
-            assert [user.user_id for user, _ in rows] == [2]
-            assert count == 2
-            rows, count = await list_matched_users(session, limit=1, offset=1)
-            assert [user.user_id for user, _ in rows] == [1]
-            assert rows[0][1].reasons == (Reason("first"), Reason("second"))
-            assert count == 2
-            assert await list_matched_users(session, limit=1, offset=2) == ([], 2)
 
         async with sessions.begin() as session:
             one_hour_later = now + timedelta(hours=1)
@@ -107,7 +97,6 @@ async def test_source_leases_snapshots_and_pagination() -> None:
         async with sessions.begin() as session:
             await save_settings(session, replace(DEFAULT_SETTINGS, sources=(second.url,)))
             assert await get_matches(session, [1001]) == {1001: Match("clear")}
-            assert await list_matched_users(session, limit=1, offset=0) == ([], 0)
             await save_settings(session, replace(DEFAULT_SETTINGS, sources=()))
             assert await get_matches(session, [1001]) == {1001: Match("unknown")}
             await save_settings(session, DEFAULT_SETTINGS)
@@ -117,6 +106,46 @@ async def test_source_leases_snapshots_and_pagination() -> None:
                 new_first.source_id,
                 new_second.source_id,
             )
+
+            completed_at = datetime.now(UTC)
+            for lease in (new_first, new_second):
+                assert await record_refresh(
+                    session, lease, completed_at, snapshot=parse_source(b"1001 # previous")
+                )
+
+        async with sessions.begin() as session:
+            assert not await source_refresh_pending(session)
+            assert await claim_due_sources(session, datetime.now(UTC)) == []
+            await request_source_refresh(session)
+            assert await source_refresh_pending(session)
+
+        async with sessions.begin() as session:
+            manual_first, manual_second = await claim_due_sources(session, datetime.now(UTC))
+
+        async with sessions.begin() as session:
+            assert await source_refresh_pending(session)
+            await request_source_refresh(session)
+            assert await claim_due_sources(session, datetime.now(UTC)) == []
+            assert await record_refresh(
+                session, manual_first, datetime.now(UTC), snapshot=parse_source(b"1002 # updated")
+            )
+            assert await source_refresh_pending(session)
+            assert await record_refresh(
+                session, manual_second, datetime.now(UTC), error="source_timeout"
+            )
+            assert not await source_refresh_pending(session)
+            assert await claim_due_sources(session, datetime.now(UTC)) == []
+            assert await get_matches(session, [1001, 1002]) == {
+                1001: Match("match", (Reason("previous"),), stale=True),
+                1002: Match("match", (Reason("updated"),)),
+            }
+
+        async with sessions.begin() as session:
+            await request_source_refresh(session)
+            assert await source_refresh_pending(session)
+            await save_settings(session, replace(DEFAULT_SETTINGS, sources=()))
+            assert not await source_refresh_pending(session)
+            assert await claim_due_sources(session, datetime.now(UTC)) == []
     finally:
         await engine.dispose()
         async with admin.begin() as connection:
