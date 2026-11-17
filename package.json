@@ -1,0 +1,19 @@
+{
+  "name": "minishop-blacklist",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "node scripts/build-frontend.mjs",
+    "test": "node --test tests/frontend/*.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "happy-dom": "20.14.5",
+    "typescript": "6.0.3"
+  }
+}

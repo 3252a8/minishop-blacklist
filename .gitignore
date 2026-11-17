@@ -221,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Plugin development and local signing
+/.local/
+/node_modules/

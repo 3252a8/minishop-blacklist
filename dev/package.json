@@ -1,0 +1,67 @@
+{
+  "id": "minishop-blacklist",
+  "name": "Чёрный список",
+  "description": "Пометки в админке Minishop и уведомления о совпадениях с внешними чёрными списками.",
+  "plugin_api": 1,
+  "frontend_host_api": 1,
+  "core_revision": "2b6d2ce62a612d3a43ffec1437195f4b1ef7a1fe",
+  "core_compatibility": {
+    "mode": "capabilities",
+    "requires": {
+      "ui_composition": 3,
+      "durable_jobs": 1
+    }
+  },
+  "runtime": {
+    "python": "3.12",
+    "system": "linux",
+    "machine": "x86_64"
+  },
+  "backend": {
+    "entry_point": "minishop_blacklist:plugin"
+  },
+  "frontend": {
+    "entry": "admin/index.js",
+    "styles": ["admin/index.css"],
+    "sections": [
+      {
+        "id": "minishop-blacklist",
+        "view": "matched-users",
+        "group": "operations",
+        "order": 100,
+        "i18nKey": "minishop_blacklist_nav",
+        "label": "Blacklisted users",
+        "titleI18nKey": "minishop_blacklist_title",
+        "title": "Blacklisted users",
+        "subtitleI18nKey": "minishop_blacklist_subtitle",
+        "subtitle": "Minishop users found in the configured blacklists."
+      }
+    ],
+    "settings_tabs": [
+      {
+        "id": "settings",
+        "view": "settings",
+        "label": "Settings",
+        "i18nKey": "minishop_blacklist_settings"
+      }
+    ],
+    "user_panels": [
+      {
+        "id": "status",
+        "view": "user-status",
+        "label": "Blacklist",
+        "i18nKey": "minishop_blacklist_status"
+      }
+    ],
+    "slots": [
+      {
+        "id": "minishop-blacklist-ticket-status",
+        "view": "ticket-status",
+        "target": "admin.support.ticket.content",
+        "placement": "before",
+        "label": "Blacklist",
+        "i18nKey": "minishop_blacklist_status"
+      }
+    ]
+  }
+}
