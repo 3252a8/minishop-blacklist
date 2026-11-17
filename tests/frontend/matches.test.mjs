@@ -60,7 +60,11 @@ test("blacklist uses native table controls and opens profiles through the host w
 
   assert.equal(requests[0].get("q"), "Olivia");
   assert.equal(requests[0].get("offset"), "25");
-  assert.equal(target.querySelector("th").textContent.trim(), "User↕");
+  const headers = [...target.querySelectorAll("thead th")].map((header) => header.textContent.trim());
+  assert.deepEqual(headers.slice(0, 3), ["User↕", "Reasons and links", "Tariff / trial"]);
+  const reasonCell = target.querySelector("tbody tr").children[1];
+  assert.match(reasonCell.textContent, /Duplicate refund request/u);
+  assert.equal(reasonCell.querySelector("a").href, "https://example.test/case");
   assert.match(target.querySelector("table").textContent, /Tariff \/ trial.*Balance.*Premium traffic.*Paid total/u);
   assert.match(target.querySelector(".admin-user-mobile-card").textContent, /Standard.*Duplicate refund request/u);
   main.scrollTop = 180;

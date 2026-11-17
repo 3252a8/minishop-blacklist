@@ -156,6 +156,7 @@ function columns(page: MatchPage, props: MatchProps, t: NativeTranslate): Column
   const col = (key: string, name: NativeKey, content: Column["content"], sort?: Column["sort"]): Column => ({ key, label: t(name), content, ...(sort && { sort }) });
   return [
     col("user", "user", (row) => profileIdentity(row, props), { key: "name", first: "asc" }),
+    { key: "reasons", label: translator(props)("reason_column"), content: (row) => reasonCell(row, props) },
     col("tariff", "users_col_tariff", (row) => subscriptionPlan(row.profile, t, language(props))),
     ...(page.user_balance_enabled ? [col("balance", "users_col_user_balance", (row) => balance(row.profile?.user_balance_amount_minor))] : []),
     ...(page.partner_balance_enabled ? [col("partner-balance", "users_col_partner_balance", (row) => balance(row.profile?.partner_balance_amount_minor))] : []),
@@ -166,7 +167,6 @@ function columns(page: MatchPage, props: MatchProps, t: NativeTranslate): Column
     col("status", "status", (row) => profileStatus(row.profile, props, t), { key: "status", first: "asc" }),
     col("expiry", "users_col_subscription_expires", (row) => date(row.profile?.subscription_expires_at ?? row.profile?.panel_status_expired_at ?? null), { key: "subscription_expires_at", first: "asc" }),
     col("registration", "users_col_registration", (row) => date(row.profile?.registration_date ?? null), { key: "registered", first: "desc" }),
-    { key: "reasons", label: translator(props)("reason_column"), content: (row) => reasonCell(row, props) },
   ];
 }
 

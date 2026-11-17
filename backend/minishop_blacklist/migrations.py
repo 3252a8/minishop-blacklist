@@ -1,7 +1,8 @@
 """The plugin's migration chain for Minishop's PostgreSQL database."""
 
+from db.extension_models import ExtensionOperation
 from db.migrator.engine import Migration
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.engine import Connection
 
 from .refresh_migration import refresh_migration
@@ -80,6 +81,26 @@ def _notification_diagnostics(connection: Connection) -> None:
     )
 
 
+def _retire_test_alerts(connection: Connection) -> None:
+    # The host otherwise keeps checking unfinished jobs with a removed handler.
+    operation = ExtensionOperation.__table__
+    connection.execute(
+        operation.update()
+        .where(
+            operation.c.owner == "minishop-blacklist",
+            operation.c.kind == "test-alert",
+            operation.c.state.in_(("queued", "blocked", "running")),
+        )
+        .values(
+            state="failed",
+            error_code="blacklist_test_alert_removed",
+            lease_token=None,
+            lease_until=None,
+            updated_at=func.now(),
+        )
+    )
+
+
 def migrations() -> list[Migration]:
     return [
         Migration(
@@ -93,4 +114,9 @@ def migrations() -> list[Migration]:
             upgrade=_notification_diagnostics,
         ),
         refresh_migration(),
+        Migration(
+            id="minishop-blacklist.0004_retire_test_alerts",
+            description="Cancel unfinished jobs from the retired Telegram diagnostics",
+            upgrade=_retire_test_alerts,
+        ),
     ]

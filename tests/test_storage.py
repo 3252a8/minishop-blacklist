@@ -4,7 +4,9 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from db.extension_models import ExtensionOperation
 from db.migrator.engine import run_migration_chains
+from db.models import User
 from minishop_blacklist.migrations import migrations
 from minishop_blacklist.settings import DEFAULT_SETTINGS
 from minishop_blacklist.sources import Reason, parse_source
@@ -19,7 +21,7 @@ from minishop_blacklist.storage import (
     save_settings,
     source_refresh_pending,
 )
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -38,16 +40,63 @@ async def test_source_leases_and_snapshots() -> None:
         async with admin.begin() as connection:
             await connection.execute(text(f"CREATE SCHEMA {schema}"))
         chain = migrations()
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        operations = ExtensionOperation.__table__
+        retiring = {f"test-{state}": state for state in ("queued", "blocked", "running")}
+        retained = {"sent-test": "succeeded", "customer-alert": "queued", "other-plugin": "queued"}
         async with engine.begin() as connection:
+            await connection.run_sync(User.__table__.create)
+            await connection.run_sync(operations.create)
             await connection.run_sync(run_migration_chains, {"minishop-blacklist": chain[:1]})
             await connection.execute(
                 text("UPDATE ext_minishop_blacklist_settings SET refresh_hours = 36")
             )
         async with engine.begin() as connection:
+            await connection.run_sync(run_migration_chains, {"minishop-blacklist": chain[:3]})
+            await connection.execute(
+                text(
+                    "INSERT INTO ext_minishop_blacklist_diagnostics (event, status) "
+                    "VALUES ('test', 'sent')"
+                )
+            )
+            jobs = retiring | retained
+            await connection.execute(
+                operations.insert(),
+                [
+                    {
+                        "id": key,
+                        "owner": "example" if key == "other-plugin" else "minishop-blacklist",
+                        "kind": "send-alert" if key == "customer-alert" else "test-alert",
+                        "idempotency_key": key,
+                        "payload_json": "{}",
+                        "state": value,
+                        "lease_token": "held-lease" if value == "running" else None,
+                        "lease_until": now + timedelta(minutes=1) if value == "running" else None,
+                        "not_before": now,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    for key, value in jobs.items()
+                ],
+            )
+        async with engine.begin() as connection:
             await connection.run_sync(run_migration_chains, {"minishop-blacklist": chain})
+            rows = (await connection.execute(select(operations))).mappings().all()
+            assert {row["id"]: row["state"] for row in rows} == dict.fromkeys(
+                retiring, "failed"
+            ) | retained
+            for row in rows:
+                if row["id"] in retiring:
+                    assert row["error_code"] == "blacklist_test_alert_removed"
+                    assert row["lease_token"] is None and row["lease_until"] is None
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM ext_minishop_blacklist_diagnostics")
+                )
+                == 1
+            )
 
         sessions = async_sessionmaker(engine, expire_on_commit=False)
-        now = datetime(2026, 1, 1, tzinfo=UTC)
         async with sessions.begin() as session:
             assert await get_settings(session) == replace(DEFAULT_SETTINGS, refresh_hours=36)
             await save_settings(session, DEFAULT_SETTINGS)

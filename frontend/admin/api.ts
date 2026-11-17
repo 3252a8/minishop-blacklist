@@ -110,17 +110,17 @@ export class ApiError extends Error {
   }
 }
 
-export function record(value: unknown): Record<string, unknown> {
+function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError("invalid_response");
   return value as Record<string, unknown>;
 }
 
-export function string(value: unknown): string {
+function string(value: unknown): string {
   if (typeof value !== "string") throw new ApiError("invalid_response");
   return value;
 }
 
-export function boolean(value: unknown): boolean {
+function boolean(value: unknown): boolean {
   if (typeof value !== "boolean") throw new ApiError("invalid_response");
   return value;
 }
@@ -130,22 +130,22 @@ function integer(value: unknown): number {
   return value;
 }
 
-export function nullable<T>(value: unknown, decode: (value: unknown) => T): T | null {
+function nullable<T>(value: unknown, decode: (value: unknown) => T): T | null {
   return value === null ? null : decode(value);
 }
 
-export function array<T>(value: unknown, decode: (value: unknown) => T): T[] {
+function array<T>(value: unknown, decode: (value: unknown) => T): T[] {
   if (!Array.isArray(value)) throw new ApiError("invalid_response");
   return value.map(decode);
 }
 
-export function choice<T extends string>(value: unknown, choices: readonly T[]): T {
+function choice<T extends string>(value: unknown, choices: readonly T[]): T {
   const selected = choices.find((item) => item === value);
   if (selected === undefined) throw new ApiError("invalid_response");
   return selected;
 }
 
-export function decodeSettingsData(payload: Record<string, unknown>): SettingsData {
+function decodeSettingsData(payload: Record<string, unknown>): SettingsData {
   const settings = record(payload.settings);
   const display = record(settings.display);
   return {
@@ -188,7 +188,7 @@ function decodeStatus(value: unknown): Status {
   };
 }
 
-export async function request(path: string, signal: AbortSignal, method = "GET", body?: object) {
+async function request(path: string, signal: AbortSignal, method = "GET", body?: object) {
   const headers: Record<string, string> = { Accept: "application/json" };
   const options: RequestInit = { method, headers, credentials: "same-origin", signal };
   if (body !== undefined) {
